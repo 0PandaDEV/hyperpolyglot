@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
 };
+use regex::Regex;
 
 pub mod detectors;
 pub mod filters;
@@ -306,6 +307,11 @@ fn filter_candidates(
 /// assert_eq!(Detection::Classifier("Rust"), language);
 /// ```
 pub fn detect_from_text(content: &str) -> Option<Detection> {
+    // Early return if the content looks like plain text
+    if looks_like_plain_text(content) {
+        return None;
+    }
+
     // Since we don't have filename/extension info, we'll use all supported languages as candidates
     let candidates: Vec<&'static str> = LANGUAGE_INFO.keys().copied().collect();
     
@@ -314,6 +320,70 @@ pub fn detect_from_text(content: &str) -> Option<Detection> {
     
     // Use classifier to determine the language
     Some(Detection::Classifier(detectors::classify(content, &candidates)))
+}
+
+fn looks_like_plain_text(content: &str) -> bool {
+    // Common build output and log patterns
+    let build_log_patterns = [
+        Regex::new(r"(built|Building|building) in \d+").unwrap(),
+        Regex::new(r"^\[?\d{1,2}:\d{2}:\d{2}(.\d{3})?\]?").unwrap(), // Time stamps
+        Regex::new(r"^(✔|✓|->|\[INFO\]|\[ERROR\]|\[WARN\])").unwrap(), // Common log indicators
+        Regex::new(r"(starting|finished|completed|done|ready|listening)").unwrap(),
+    ];
+
+    // Existing sentence pattern
+    let sentence_pattern = Regex::new(r"^[A-Z].*[.!?]$").unwrap();
+    
+    // Code patterns
+    let code_patterns = [
+        Regex::new(r"[{}\[\]();]").unwrap(),
+        Regex::new(r"^(function|def|class|if|for|while|import|package)\b").unwrap(),
+        Regex::new(r"^\s*(public|private|protected)\b").unwrap(),
+    ];
+
+    let lines: Vec<&str> = content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return true;
+    }
+
+    // Check for build/log output
+    let log_lines = lines
+        .iter()
+        .filter(|line| {
+            build_log_patterns.iter().any(|pattern| pattern.is_match(line))
+        })
+        .count();
+
+    let log_ratio = log_lines as f32 / lines.len() as f32;
+    
+    // If it looks like build output or logs, return true (it's not code)
+    if log_ratio > 0.2 {
+        return true;
+    }
+
+    let code_lines = lines
+        .iter()
+        .filter(|line| {
+            code_patterns.iter().any(|pattern| pattern.is_match(line))
+        })
+        .count();
+
+    let code_ratio = code_lines as f32 / lines.len() as f32;
+    let sentence_lines = lines
+        .iter()
+        .filter(|line| sentence_pattern.is_match(line))
+        .count();
+    let sentence_ratio = sentence_lines as f32 / lines.len() as f32;
+
+    // Consider it plain text if:
+    // 1. It has more sentence-like lines than code-like lines AND sentence ratio is significant
+    // 2. OR if it has very few code-like patterns
+    sentence_ratio > code_ratio && sentence_ratio > 0.3 || code_ratio < 0.1
 }
 
 #[cfg(test)]
